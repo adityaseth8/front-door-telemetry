@@ -1,0 +1,2 @@
+source C:/front-door-telemetry/src/build/gdbinit/symbols
+source C:/front-door-telemetry/src/build/gdbinit/connect
