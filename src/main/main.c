@@ -1,14 +1,3 @@
-/* ADXL345 Accelerometer Example (I2C Mode)
-
-   This example reads X, Y, Z acceleration values from ADXL345 via I2C
-   and outputs them via serial monitor in g units.
-   
-   Wiring (I2C):
-   - ADXL345 VCC → ESP32 3.3V
-   - ADXL345 GND → ESP32 GND
-   - ADXL345 SDA → ESP32 GPIO 23
-   - ADXL345 SCL → ESP32 GPIO 18
-*/
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,27 +5,28 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 
-static const char *TAG = "ADXL345_I2C";
+static const char *TAG = "LIS3DH_I2C";
 
-// ADXL345 I2C address
-#define ADXL345_ADDR 0x53
+// I2C address (SDO → GND)
+#define LIS3DH_ADDR 0x18
 
-// ADXL345 Register addresses
-#define ADXL345_DEVID 0x00
-#define ADXL345_POWER_CTL 0x2D
-#define ADXL345_DATA_FORMAT 0x31
-#define ADXL345_DATAX0 0x32
-#define ADXL345_DATAX1 0x33
-#define ADXL345_DATAY0 0x34
-#define ADXL345_DATAY1 0x35
-#define ADXL345_DATAZ0 0x36
-#define ADXL345_DATAZ1 0x37
+// LIS3DH registers
+#define LIS3DH_WHO_AM_I   0x0F
+#define LIS3DH_CTRL_REG1  0x20
+
+#define LIS3DH_OUT_X_L    0x28
+#define LIS3DH_OUT_X_H    0x29
+#define LIS3DH_OUT_Y_L    0x2A
+#define LIS3DH_OUT_Y_H    0x2B
+#define LIS3DH_OUT_Z_L    0x2C
+#define LIS3DH_OUT_Z_H    0x2D
 
 // I2C pins
 #define I2C_MASTER_SDA_IO 23
 #define I2C_MASTER_SCL_IO 18
 #define I2C_MASTER_FREQ_HZ 100000
 
+// ---------------- I2C INIT ----------------
 static void i2c_init(void)
 {
     i2c_config_t conf = {
@@ -47,80 +37,81 @@ static void i2c_init(void)
         .scl_pullup_en = GPIO_PULLUP_ENABLE,
         .master.clk_speed = I2C_MASTER_FREQ_HZ,
     };
+
     i2c_param_config(I2C_NUM_0, &conf);
     i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0);
-    ESP_LOGI(TAG, "I2C initialized on SDA=GPIO23, SCL=GPIO18");
+
+    ESP_LOGI(TAG, "I2C initialized");
 }
 
-static uint8_t adxl345_read_register(uint8_t reg)
+// ---------------- LOW LEVEL ----------------
+static uint8_t lis3dh_read_register(uint8_t reg)
 {
     uint8_t data;
-    i2c_master_write_read_device(I2C_NUM_0, ADXL345_ADDR, 
+    i2c_master_write_read_device(I2C_NUM_0, LIS3DH_ADDR,
                                  &reg, 1,
-                                 &data, 1, 1000 / portTICK_PERIOD_MS);
+                                 &data, 1,
+                                 1000 / portTICK_PERIOD_MS);
     return data;
 }
 
-static void adxl345_write_register(uint8_t reg, uint8_t value)
+static void lis3dh_write_register(uint8_t reg, uint8_t value)
 {
     uint8_t data[2] = {reg, value};
-    i2c_master_write_to_device(I2C_NUM_0, ADXL345_ADDR,
-                               data, 2, 1000 / portTICK_PERIOD_MS);
+    i2c_master_write_to_device(I2C_NUM_0, LIS3DH_ADDR,
+                               data, 2,
+                               1000 / portTICK_PERIOD_MS);
 }
 
-static void adxl345_init(void)
+// ---------------- INIT ----------------
+static void lis3dh_init(void)
 {
-    vTaskDelay(100 / portTICK_PERIOD_MS);  // Wait for ADXL345 to power up
-    
-    // Check device ID
-    uint8_t devid = adxl345_read_register(ADXL345_DEVID);
-    ESP_LOGI(TAG, "ADXL345 Device ID: 0x%02X (should be 0xE5)", devid);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
 
-    // Set data format (16-bit mode, ±16g range)
-    adxl345_write_register(ADXL345_DATA_FORMAT, 0x0B);
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    uint8_t id = lis3dh_read_register(LIS3DH_WHO_AM_I);
+    ESP_LOGI(TAG, "WHO_AM_I: 0x%02X (expected 0x33)", id);
 
-    // Enable measurement mode
-    adxl345_write_register(ADXL345_POWER_CTL, 0x08);
+    // Enable sensor: 100Hz, all axes
+    lis3dh_write_register(LIS3DH_CTRL_REG1, 0x57);
+
     vTaskDelay(50 / portTICK_PERIOD_MS);
-    
-    ESP_LOGI(TAG, "ADXL345 initialized");
+
+    ESP_LOGI(TAG, "LIS3DH initialized");
 }
 
-static void read_adxl345(void)
+// ---------------- READ DATA ----------------
+static void read_lis3dh(void)
 {
-    // Read X axis
-    uint8_t x0 = adxl345_read_register(ADXL345_DATAX0);
-    uint8_t x1 = adxl345_read_register(ADXL345_DATAX1);
-    int16_t x = (int16_t)((x1 << 8) | x0);
+    uint8_t reg = LIS3DH_OUT_X_L | 0x80; // auto-increment
+    uint8_t data[6];
 
-    // Read Y axis
-    uint8_t y0 = adxl345_read_register(ADXL345_DATAY0);
-    uint8_t y1 = adxl345_read_register(ADXL345_DATAY1);
-    int16_t y = (int16_t)((y1 << 8) | y0);
+    i2c_master_write_read_device(I2C_NUM_0, LIS3DH_ADDR,
+                                 &reg, 1,
+                                 data, 6,
+                                 1000 / portTICK_PERIOD_MS);
 
-    // Read Z axis
-    uint8_t z0 = adxl345_read_register(ADXL345_DATAZ0);
-    uint8_t z1 = adxl345_read_register(ADXL345_DATAZ1);
-    int16_t z = (int16_t)((z1 << 8) | z0);
+    int16_t x = (int16_t)((data[1] << 8) | data[0]);
+    int16_t y = (int16_t)((data[3] << 8) | data[2]);
+    int16_t z = (int16_t)((data[5] << 8) | data[4]);
 
-    // Convert to g (±16g range, 13-bit data)
-    float out_X = x * 0.0078f;  // 4mg per LSB for ±16g
-    float out_Y = y * 0.0078f;
-    float out_Z = z * 0.0078f;
+    // Scale for ±2g (default)
+    float ax = x * 0.000061f;
+    float ay = y * 0.000061f;
+    float az = z * 0.000061f;
 
-    ESP_LOGI(TAG, "X: %.2fg   Y: %.2fg   Z: %.2fg", out_X, out_Y, out_Z);
+    ESP_LOGI(TAG, "X: %.3fg  Y: %.3fg  Z: %.3fg", ax, ay, az);
 }
 
+// ---------------- MAIN ----------------
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting ADXL345 example");
+    ESP_LOGI(TAG, "Starting LIS3DH example");
 
     i2c_init();
-    adxl345_init();
+    lis3dh_init();
 
     while (1) {
-        read_adxl345();
-        vTaskDelay(100 / portTICK_PERIOD_MS);  // Read every 100ms
+        read_lis3dh();
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
