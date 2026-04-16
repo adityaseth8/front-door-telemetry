@@ -25,7 +25,8 @@ struct SensorData {
 void format_timestamp(char *out, size_t out_size) {
     struct timeval tv;
     gettimeofday(&tv, NULL);                         // replaces time(NULL)
-    struct tm *t = localtime((const time_t*)&tv.tv_sec);
+    time_t seconds = (time_t)tv.tv_sec;                      // convert to time_t for localtime
+    struct tm *t = localtime(&seconds);
     int len = strftime(out, out_size, "%Y-%m-%d %H:%M:%S", t);
     snprintf(out + len, out_size - len, ".%06ld", tv.tv_usec);  // append microseconds
 }
