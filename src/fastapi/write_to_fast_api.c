@@ -5,10 +5,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <sys/time.h>
+#include <curl/curl.h>
 
 // #include <cstdint>
-
-// #include <curl/curl.h>
 
 #define BATCH_SIZE 200
 #define JSON_SIZE  160   // bumped: timestamp alone is 26 chars + float fields
@@ -20,6 +19,8 @@ struct SensorData {
     float x, y, z;
     char  timestamp_us[64];
 };
+
+char payload[BATCH_SIZE * JSON_SIZE + 32]; // extra for commas + brackets
 
 // --- Timestamp: microsecond precision ---
 void format_timestamp(char *out, size_t out_size) {
@@ -52,12 +53,49 @@ void flush_batch() {
 
 // --- send_data: removed redundant stack copy ---
 void send_data(const char *json) {
+    
+    // set up batch
     strncpy(batch[batch_idx], json, JSON_SIZE - 1);
     batch[batch_idx][JSON_SIZE - 1] = '\0';
     batch_idx++;
 
+    printf("batch size reached, now send");
     if (batch_idx >= BATCH_SIZE) {
         flush_batch();    // extracted so the HTTP stub lives in one place
+        
+        payload[0] = '\0';
+        strcat(payload, "[");
+
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            strcat(payload, batch[i]);
+            if (i < BATCH_SIZE - 1) {
+                strcat(payload, ",");
+            }
+        }
+
+        strcat(payload, "]");
+
+        CURL *curl = curl_easy_init();
+        if (!curl) {
+            printf("curl not found\n");
+            return;
+        }
+
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8000/data");
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload);
+
+        CURLcode res = curl_easy_perform(curl);
+        if (res != CURLE_OK)
+            fprintf(stderr, "curl error: %s\n", curl_easy_strerror(res));
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        exit(0);
     }
 }
 
@@ -83,6 +121,8 @@ int main() {
     while (true) {
         struct SensorData d = receive_sensor_data();
         prepare_and_send_data(d.x, d.y, d.z, d.timestamp_us);
+        // usleep(250000); // 25 ms
+
     }
     return 0;
 }
