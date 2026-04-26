@@ -1,6 +1,3 @@
-// needed to use mysys to install .dll files for curl.h - ucrt64 (what type is this)
-// gcc write_to_fast_api.c -I"C:\msys64\ucrt64\include" -L"C:\msys64\ucrt64\lib" -lcurl -o your_program.exe
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
