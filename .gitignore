@@ -1,0 +1,26 @@
+# ESP-IDF build output
+build/
+*/build/
+
+# CMake / Ninja
+CMakeFiles/
+cmake-build-*/
+*.ninja
+.ninja_*
+
+# binaries
+*.bin
+*.elf
+*.map
+*.dll
+
+# compile database
+compile_commands.json
+
+# logs
+log/
+*.log
+
+# IDF temp files
+*.bin_timestamp
+*.json
