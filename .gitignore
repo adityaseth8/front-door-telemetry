@@ -24,3 +24,7 @@ log/
 # IDF temp files
 *.bin_timestamp
 *.json
+
+Kconfig.projbuild
+sdkconfig
+sdkconfig.old

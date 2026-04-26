@@ -19,8 +19,11 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 
-#define WIFI_SSID "REDACTED"
-#define WIFI_PASS "REDACTED"
+#include "esp_sntp.h" // clock
+
+#define WIFI_SSID CONFIG_WIFI_SSID
+#define WIFI_PASS CONFIG_WIFI_PASSWORD
+#define FASTAPI_URL CONFIG_FASTAPI_URL
 
 static EventGroupHandle_t wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
@@ -83,6 +86,20 @@ void wifi_init() {
 
 static spi_device_handle_t spi;
 
+void sync_time() {
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+
+    time_t now = 0;
+    while (now < 100000) {
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        time(&now);
+    }
+    ESP_LOGI(TAG, "Time synced");
+}
+
+
 #define BATCH_SIZE 50
 #define JSON_SIZE  160   // bumped: timestamp alone is 26 chars + float fields
 
@@ -109,22 +126,25 @@ void add_to_batch(const char *json) {
 
 void format_timestamp(char *out, size_t out_size) {
     struct timeval tv;
-    gettimeofday(&tv, NULL);                                 // replaces time(NULL)
-    time_t seconds = (time_t)tv.tv_sec;                      // convert to time_t for localtime
-    struct tm *t = localtime(&seconds);
+    gettimeofday(&tv, NULL);
+
+    time_t seconds = (time_t)tv.tv_sec;
+
+    struct tm t;
+    gmtime_r(&seconds, &t);
     
-    int len = strftime(out, out_size, "%Y-%m-%dT%H:%M:%S", t);
+    int len = strftime(out, out_size, "%Y-%m-%dT%H:%M:%S", &t);
     snprintf(out + len, out_size - len, ".%06ldZ", tv.tv_usec);
     // int len = strftime(out, out_size, "%Y-%m-%d %H:%M:%S", t);
     
-    // // append microseconds
+    // append microseconds
     // snprintf(out + len, out_size - len, ".%06ld", tv.tv_usec);  // sprintf stores output to buffer
 }
 
 
 void send_batch_data(const char *payload) {
     esp_http_client_config_t config = {
-        .url = "REDACTED", // IPv4 address of FastAPI server 
+        .url = FASTAPI_URL, // IPv4 address of FastAPI server 
         .method = HTTP_METHOD_POST,
         .timeout_ms = 3000,
     };
@@ -263,6 +283,8 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting LIS3DH SPI example");
 
     wifi_init();  // must be first
+
+    sync_time(); // using NTP
 
 
     spi_init();
