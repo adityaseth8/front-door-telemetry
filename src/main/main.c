@@ -6,6 +6,25 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 
+#include <stdlib.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <time.h>
+#include <sys/time.h>
+#include "esp_http_client.h"
+
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+
+#define WIFI_SSID "REDACTED"
+#define WIFI_PASS "REDACTED"
+
+static EventGroupHandle_t wifi_event_group;
+#define WIFI_CONNECTED_BIT BIT0
+
 static const char *TAG = "LIS3DH_SPI";
 
 // SPI pins
@@ -21,7 +40,107 @@ static const char *TAG = "LIS3DH_SPI";
 
 #define LIS3DH_OUT_X_L    0x28
 
+static void wifi_event_handler(void *arg, esp_event_base_t base,
+                                int32_t event_id, void *event_data) {
+    if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+        esp_wifi_connect();
+    else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+        esp_wifi_connect();  // auto reconnect
+}
+
+void wifi_init() {
+    wifi_event_group = xEventGroupCreate();
+
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid     = WIFI_SSID,
+            .password = WIFI_PASS,
+        },
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // block until connected
+    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT,
+                        false, true, portMAX_DELAY);
+    ESP_LOGI(TAG, "WiFi connected");
+}
+
 static spi_device_handle_t spi;
+
+#define BATCH_SIZE 50
+#define JSON_SIZE  160   // bumped: timestamp alone is 26 chars + float fields
+
+static char batch[BATCH_SIZE][JSON_SIZE];
+static int  batch_idx = 0;
+
+struct SensorData {
+	float x, y, z;
+	char  timestamp_us[64];
+};
+
+int build_json(float x, float y, float z, char *json, size_t json_size, char *timestamp) {
+    return snprintf(json, json_size,
+                    "{\"x\": %.3f, \"y\": %.3f, \"z\": %.3f, \"timestamp\": \"%s\"}",
+                    x, y, z, timestamp);
+}
+
+void add_to_batch(const char *json) {
+    // add json entry to buffer containing batch data
+    strncpy(batch[batch_idx], json, JSON_SIZE - 1);
+    batch[batch_idx][JSON_SIZE - 1] = '\0';
+    batch_idx++;
+}
+
+void format_timestamp(char *out, size_t out_size) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);                                 // replaces time(NULL)
+    time_t seconds = (time_t)tv.tv_sec;                      // convert to time_t for localtime
+    struct tm *t = localtime(&seconds);
+    
+    int len = strftime(out, out_size, "%Y-%m-%dT%H:%M:%S", t);
+    snprintf(out + len, out_size - len, ".%06ldZ", tv.tv_usec);
+    // int len = strftime(out, out_size, "%Y-%m-%d %H:%M:%S", t);
+    
+    // // append microseconds
+    // snprintf(out + len, out_size - len, ".%06ld", tv.tv_usec);  // sprintf stores output to buffer
+}
+
+
+void send_batch_data(const char *payload) {
+    esp_http_client_config_t config = {
+        .url = "REDACTED", // IPv4 address of FastAPI server 
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 3000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, payload, strlen(payload));
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP POST Status = %d, content_length = %d",
+                 esp_http_client_get_status_code(client),
+                 esp_http_client_get_content_length(client));
+    } else {
+        ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+}
 
 // ---------------- SPI WRITE ----------------
 static void lis3dh_write(uint8_t reg, uint8_t value)
@@ -74,21 +193,45 @@ static void lis3dh_init()
 }
 
 // ---------------- READ ACCEL ----------------
-static void lis3dh_read()
+
+static char payload[BATCH_SIZE * JSON_SIZE + 32]; // extra for commas + brackets
+
+static void lis3dh_read_and_batch()
 {
-    uint8_t data[6];
+    struct SensorData data;
+    format_timestamp(data.timestamp_us, sizeof(data.timestamp_us));
+    uint8_t raw[6];
+    lis3dh_read_multi(LIS3DH_OUT_X_L, raw, 6);
 
-    lis3dh_read_multi(LIS3DH_OUT_X_L, data, 6);
+    int16_t x = (int16_t)(raw[1] << 8 | raw[0]);
+    int16_t y = (int16_t)(raw[3] << 8 | raw[2]);
+    int16_t z = (int16_t)(raw[5] << 8 | raw[4]);
 
-    int16_t x = (int16_t)(data[1] << 8 | data[0]);
-    int16_t y = (int16_t)(data[3] << 8 | data[2]);
-    int16_t z = (int16_t)(data[5] << 8 | data[4]);
+    data.x = x * 0.000061f;
+    data.y = y * 0.000061f;
+    data.z = z * 0.000061f;
 
-    float ax = x * 0.000061f;
-    float ay = y * 0.000061f;
-    float az = z * 0.000061f;
+    ESP_LOGI(TAG, "X: %.3fg Y: %.3fg Z: %.3fg", data.x, data.y, data.z);
 
-    ESP_LOGI(TAG, "X: %.3fg Y: %.3fg Z: %.3fg", ax, ay, az);
+    char json[JSON_SIZE];
+    build_json(data.x, data.y, data.z, json, sizeof(json), data.timestamp_us);
+    add_to_batch(json);
+
+    if (batch_idx >= BATCH_SIZE) {
+        // Send batch to FastAPI server
+        ESP_LOGI(TAG, "Batch full, sending data to FastAPI server...");
+        payload[0] = '\0';
+        strcat(payload, "[");
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            strcat(payload, batch[i]);
+            if (i < BATCH_SIZE - 1) {
+                strcat(payload, ",");
+            }
+        }
+        strcat(payload, "]");
+        send_batch_data(payload);
+        batch_idx = 0; // reset batch
+    }
 }
 
 // ---------------- SPI INIT ----------------
@@ -119,20 +262,20 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Starting LIS3DH SPI example");
 
+    wifi_init();  // must be first
+
+
     spi_init();
     lis3dh_init();
 
     while (1)
     {
         uint8_t status = 0;
-
         // check DATA READY bit
         lis3dh_read_multi(LIS3DH_STATUS_REG, &status, 1);
-
         if (status & 0x08) {
-            lis3dh_read();
+            lis3dh_read_and_batch();
         }
-
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }
