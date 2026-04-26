@@ -12,6 +12,7 @@ cmake-build-*/
 *.bin
 *.elf
 *.map
+*.dll
 
 # compile database
 compile_commands.json
